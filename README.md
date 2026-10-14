@@ -10,13 +10,13 @@ Press any key or tap to start. You die at 0 HP. Score is `gold + depth × 50 + k
 
 | Action | Keyboard | Phone |
 | --- | --- | --- |
-| Move or attack | Arrows or WASD | Swipe or d-pad |
+| Move | Arrows or WASD | Swipe or d-pad |
 | Fireball (4 MP) | Space | FIRE |
 | Wait | `.` | Centre button |
 | Mute | M | — |
 | Restart | R | Tap |
 
-Walk into a monster to hit it. A fireball flies the way you last moved and stops at the first monster or wall. Mana comes back 1 per turn. Casting without enough mana does nothing.
+Touching a monster hurts you; the fireball (Space) is your only weapon. A fireball flies the way you last moved and stops at the first monster or wall. Mana comes back 1 per turn. Casting without enough mana does nothing.
 
 ## What you find
 

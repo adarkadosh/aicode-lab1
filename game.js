@@ -114,7 +114,7 @@ if (typeof window !== 'undefined') (function () {
   const MAX_MANA = 10, FB_COST = 4, FB_RANGE = 8, FB_MS = 40; // fireball: mana cost, tiles, ms per tile
   let W = 0, H = 0, dpr = 1, ts = 32, u = 1, vign, hurtImg;
   let G, cam = { x: 0, y: 0 }, parts = [], floats = [], flashes = [], shake = 0, hurt = 0, fade = 0, turn = 0, msgTimer = 0, miniDirty = true;
-  let queued = null, held = [], lastAct = 0, last = performance.now();
+  let bestNow = false, queued = null, held = [], lastAct = 0, last = performance.now();
   let padTop = 0, padBot = 0, mt = 2, ms = 1, ovl = [], frameNo = 0; // overlay-aware camera padding (css px), minimap scale
   const rnd = Math.random;
   const GOLD_PER_MANA = 50; // every 50 gold collected (cumulative) grants +1 max mana
@@ -292,7 +292,6 @@ if (typeof window !== 'undefined') (function () {
     if (dir === 'F') return cast(now);
     const [dx, dy] = DIRS[dir], p = G.p, nx = p.x + dx, ny = p.y + dy;
     let bumped = null;
-    const threat = G.enemies.filter(e => Math.abs(e.x - p.x) + Math.abs(e.y - p.y) === 1); // adjacent as the round starts: it will strike this round even if the player steps away (else a chaser that spends every turn closing the gap never attacks)
     if (dx || dy) {
       G.face = [dx, dy]; // facing = last move direction (even a bump), used to aim fireballs
       const en = enemyAt(nx, ny);
@@ -305,12 +304,12 @@ if (typeof window !== 'undefined') (function () {
         if (G.tiles[ny * MW + nx] === 2) { descend(); return true; }
       } else return false; // bumping a wall costs no turn
     }
-    endTurn(now, bumped, threat);
+    endTurn(now, bumped);
     return true;
   }
-  function endTurn(now, skip, threat) {
+  function endTurn(now, skip) {
     G.turns++; if (G.mana < G.maxmana) G.mana++;
-    computeFov(); enemiesAct(now, skip, threat); miniDirty = true; hud();
+    computeFov(); enemiesAct(now, skip); miniDirty = true; hud();
   }
 
   /* ---------- fireball ---------- */
@@ -387,15 +386,16 @@ if (typeof window !== 'undefined') (function () {
   const score = () => G.gold + G.depth * 50 + G.kills * 10;
   function pulse(el) { el.classList.remove('up'); void el.offsetWidth; el.classList.add('up'); }
   function refreshBest(sc) { // keep the best score live; the first time a run passes an existing best, celebrate once
-    if (sc <= best) return;
-    if (G.startBest > 0 && !G.newBest) { G.newBest = true; say('NEW BEST!'); sfx.best(); pulse($('bestcell')); floatText(G.p.x + 0.5, G.p.y - 1, 'NEW BEST!', '#ffd34d'); }
+    if (sc <= best || !(G.gold > 0 || G.kills > 0 || G.depth > 1)) return; // the base depth-1 score (50) is not earned: don't persist or celebrate it
+    if (G.startBest > 0 && !G.newBest) { G.newBest = true; bestNow = true; say('NEW BEST!'); sfx.best(); pulse($('bestcell')); floatText(G.p.x + 0.5, G.p.y - 1, 'NEW BEST!', '#ffd34d'); }
     best = sc; try { localStorage.setItem('dde-best', sc); } catch (_) {}
   }
   function descend() {
-    G.depth++; G.hp = Math.min(G.maxhp, G.hp + 3); sfx.stairs(); startLevel(); hud(); say('Depth ' + G.depth + (G.depth === 3 ? ' - demons stir below' : ''));
+    G.depth++; G.hp = Math.min(G.maxhp, G.hp + 3); sfx.stairs(); startLevel(); bestNow = false; hud();
+    say('Depth ' + G.depth + (G.depth === 3 ? ' - demons stir below' : '') + (bestNow ? ' - NEW BEST!' : '')); // the depth toast would overwrite NEW BEST, so fold it in
   }
   function distMap() { return bfs(G.tiles, G.p.x, G.p.y); }
-  function enemiesAct(now, skip, threat) { // skip: the enemy the player just bumped, which already struck this turn; threat: enemies that began the round adjacent
+  function enemiesAct(now, skip) { // skip: the enemy the player just bumped, which already struck this turn. An enemy's turn is a move OR an attack, never both: orthogonally adjacent (after the player's move) -> strike, else step
     turn++; const dm = distMap(), p = G.p;
     for (const e of G.enemies) {
       if (G.state !== 'play') break;
@@ -410,8 +410,7 @@ if (typeof window !== 'undefined') (function () {
         e.alert--;
         const better = nb.filter(([x, y]) => dm[y * MW + x] >= 0 && dm[y * MW + x] < dm[i]);
         if (better.length) {
-          moveTo(e, ...better[(rnd() * better.length) | 0], now);
-          if (threat && threat.includes(e) && Math.abs(e.x - p.x) + Math.abs(e.y - p.y) === 1) attackPlayer(e, now); // followed a fleeing player and closed: strike
+          moveTo(e, ...better[(rnd() * better.length) | 0], now); // moving uses the turn: no strike until its next turn
         }
       } else if (nb.length && rnd() < 0.5) moveTo(e, ...nb[(rnd() * nb.length) | 0], now);
     }
@@ -423,7 +422,7 @@ if (typeof window !== 'undefined') (function () {
     if (G.hp <= 0) {
       G.hp = 0; G.state = 'dead'; sfx.die(); music.want = false; musicHalt(1.8); burst(p.x + 0.5, p.y + 0.5, '#ffffff', 40, 6);
       const sc = score(); refreshBest(sc);
-      $('stats').innerHTML = `Depth reached <b>${G.depth}</b><br>Gold <b>${G.gold}</b> &nbsp; Kills <b>${G.kills}</b><br>Score <b>${sc}</b> &nbsp; Best <b>${best}</b>${G.newBest ? '<br>NEW BEST!' : ''}`;
+      $('stats').innerHTML = `Depth reached <b>${G.depth}</b><br>Gold <b>${G.gold}</b> &nbsp; Kills <b>${G.kills}</b><br>Score <b>${sc}</b> &nbsp; Best <b>${Math.max(best, sc)}</b>${G.newBest ? '<br>NEW BEST!' : ''}`;
       setTimeout(() => $('over').classList.remove('hidden'), 900);
     }
   }
@@ -495,20 +494,20 @@ if (typeof window !== 'undefined') (function () {
     dpr = Math.min(window.devicePixelRatio || 1, 3);
     const iw = Math.max(1, innerWidth), ih = Math.max(1, innerHeight);
     W = cv.width = Math.max(1, Math.floor(iw * dpr)); H = cv.height = Math.max(1, Math.floor(ih * dpr));
-    // tile size: ~28 tiles across on desktop, ~24 on small laptops, ~18 on tablets, ~13 on phones; never fewer than ~10 rows
-    const across = iw < 520 ? 13 : iw < 900 ? 18 : iw < 1200 ? 24 : 28;
+    // tile size: ~22 tiles across on desktop, ~20 on small laptops, ~18 on tablets, ~13 on phones; never fewer than ~10 rows
+    const across = iw < 520 ? 13 : iw < 900 ? 18 : iw < 1200 ? 20 : 22;
     const css = Math.max(20, Math.floor(Math.min(iw / across, ih / 10)));
     ts = Math.floor(css * dpr); u = Math.max(1, Math.round(ts / 16));
     ctx.imageSmoothingEnabled = false;
     const coarse = !!(window.matchMedia && matchMedia('(pointer:coarse)').matches);
-    mt = coarse ? 1.5 : 2; ms = Math.max(1, Math.round(dpr)); // minimap: css px per tile, backing-store scale
+    mt = coarse ? 2 : 3; ms = Math.max(1, Math.round(dpr)); // minimap: css px per tile, backing-store scale
     miniEl.style.width = MW * mt + 'px'; miniEl.style.height = MH * mt + 'px'; miniEl.width = MW * mt * ms; miniEl.height = MH * mt * ms; mctx.imageSmoothingEnabled = false;
     const mk = (inner, stops) => {
       const c = document.createElement('canvas'); c.width = W; c.height = H; const g = c.getContext('2d');
       const gr = g.createRadialGradient(W / 2, H / 2, inner, W / 2, H / 2, Math.hypot(W, H) * 0.55);
       stops.forEach(([o, col]) => gr.addColorStop(o, col)); g.fillStyle = gr; g.fillRect(0, 0, W, H); return c;
     };
-    vign = mk(Math.min(W, H) * 0.3, [[0, 'rgba(0,0,0,0)'], [1, 'rgba(0,0,0,0.8)']]);
+    vign = mk(Math.min(W, H) * 0.42, [[0, 'rgba(0,0,0,0)'], [1, 'rgba(0,0,0,0.6)']]);
     hurtImg = mk(Math.min(W, H) * 0.2, [[0, 'rgba(255,0,0,0)'], [1, 'rgba(255,20,20,0.75)']]);
     measure(); miniDirty = true;
     if (G) { clampCam(1); }
@@ -640,7 +639,7 @@ if (typeof window !== 'undefined') (function () {
   function draw(now, dt) {
     const camx = Math.round(cam.x * ts), camy = Math.round(cam.y * ts);
     ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.fillStyle = '#05040a'; ctx.fillRect(0, 0, W, H);
-    const sk = shake * dpr; ctx.translate((rnd() - 0.5) * sk, (rnd() - 0.5) * sk);
+    const sk = shake * dpr, shx = (rnd() - 0.5) * sk, shy = (rnd() - 0.5) * sk; ctx.translate(shx, shy);
     const flick = 1 + 0.05 * Math.sin(now / 90) + 0.035 * Math.sin(now / 37 + 2) + 0.03 * Math.sin(now / 230);
     const [px, py] = pos(G.p, now), R = 9.5 * flick;
     const x0 = Math.max(0, Math.floor(cam.x)), y0 = Math.max(0, Math.floor(cam.y)), x1 = Math.min(MW - 1, Math.ceil(cam.x + W / ts)), y1 = Math.min(MH - 1, Math.ceil(cam.y + H / ts));
@@ -702,7 +701,10 @@ if (typeof window !== 'undefined') (function () {
       g.addColorStop(0, 'rgba(255,170,80,0.22)'); g.addColorStop(0.4, 'rgba(255,120,40,0.07)'); g.addColorStop(1, 'rgba(255,100,30,0)');
       ctx.fillStyle = g; ctx.fillRect(0, 0, W, H); }
     ctx.globalCompositeOperation = 'source-over';
-    // floating numbers
+    ctx.globalAlpha = 1; ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.drawImage(vign, 0, 0);
+    if (hurt > 0.01) { ctx.globalAlpha = hurt; ctx.drawImage(hurtImg, 0, 0); ctx.globalAlpha = 1; }
+    ctx.translate(shx, shy); // floating numbers go over the vignette so they stay full colour
     ctx.font = `${Math.round(ts * 0.42)}px "Press Start 2P", monospace`; ctx.textAlign = 'center'; ctx.lineWidth = Math.max(2, u * 1.5); ctx.lineJoin = 'round';
     for (let i = floats.length - 1; i >= 0; i--) {
       const f = floats[i], a = (now - f.t) / 900; if (a >= 1) { floats.splice(i, 1); continue; }
@@ -710,8 +712,6 @@ if (typeof window !== 'undefined') (function () {
       ctx.strokeStyle = '#000'; ctx.strokeText(f.text, fx, fy); ctx.fillStyle = f.col; ctx.fillText(f.text, fx, fy);
     }
     ctx.globalAlpha = 1; ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.drawImage(vign, 0, 0);
-    if (hurt > 0.01) { ctx.globalAlpha = hurt; ctx.drawImage(hurtImg, 0, 0); ctx.globalAlpha = 1; }
     if (fade > 0.01) { ctx.fillStyle = `rgba(5,4,10,${fade})`; ctx.fillRect(0, 0, W, H); }
   }
   function drawMini() {
@@ -719,9 +719,9 @@ if (typeof window !== 'undefined') (function () {
     mctx.fillStyle = '#05040a'; mctx.fillRect(0, 0, MW * mt, MH * mt);
     for (let y = 0; y < MH; y++) for (let x = 0; x < MW; x++) {
       const i = y * MW + x; if (!G.seen[i] || !G.tiles[i]) continue;
-      mctx.fillStyle = G.tiles[i] === 2 ? '#7fe3ff' : G.vis[i] ? '#8a7aa8' : '#41375a'; mctx.fillRect(x * mt, y * mt, mt, mt);
+      mctx.fillStyle = G.tiles[i] === 2 ? '#7fe3ff' : G.vis[i] ? '#b9a8e0' : '#5a4c7e'; mctx.fillRect(x * mt, y * mt, mt, mt);
     }
-    mctx.fillStyle = '#ffb347'; mctx.fillRect((G.p.x - 0.5) * mt, (G.p.y - 0.5) * mt, mt * 2, mt * 2);
+    mctx.fillStyle = '#ffb347'; mctx.fillRect((G.p.x - 1) * mt, (G.p.y - 1) * mt, mt * 3, mt * 3);
     for (const e of G.enemies) if (G.vis[e.y * MW + e.x]) { mctx.fillStyle = '#ff5a5a'; mctx.fillRect(e.x * mt, e.y * mt, mt, mt); }
   }
 
