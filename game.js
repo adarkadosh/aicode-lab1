@@ -117,6 +117,8 @@ if (typeof window !== 'undefined') (function () {
   let queued = null, held = [], lastAct = 0, last = performance.now();
   let padTop = 0, padBot = 0, mt = 2, ms = 1, ovl = [], frameNo = 0; // overlay-aware camera padding (css px), minimap scale
   const rnd = Math.random;
+  const GOLD_PER_MANA = 50; // every 50 gold collected (cumulative) grants +1 max mana
+  let best = 0; try { best = +localStorage.getItem('dde-best') || 0; } catch (_) {}
 
   /* ---------- audio ---------- */
   let ac = null, muted = false;
@@ -144,7 +146,6 @@ if (typeof window !== 'undefined') (function () {
   const sfx = {
     step: () => blip(80 + rnd() * 30, 0.05, 'triangle', 0.06),
     coin: () => { blip(988, 0.07, 'square', 0.04); blip(1319, 0.14, 'square', 0.04, 0, 0.07); },
-    hit: () => blip(260, 0.12, 'sawtooth', 0.06, -170),
     hurt: () => blip(150, 0.22, 'sawtooth', 0.09, -90),
     potion: () => { blip(400, 0.12, 'sine', 0.08, 500); blip(800, 0.14, 'sine', 0.06, 400, 0.1); },
     stairs: () => [392, 523, 659, 784].forEach((f, i) => blip(f, 0.14, 'square', 0.04, 0, i * 0.08)),
@@ -152,14 +153,81 @@ if (typeof window !== 'undefined') (function () {
     boom: () => { noise(0.45, 0.2, 1400, 90, 'lowpass'); blip(110, 0.35, 'sawtooth', 0.09, -70); blip(60, 0.4, 'square', 0.06, -25, 0.03); },
     pop: () => { noise(0.18, 0.1, 1800, 200, 'lowpass'); blip(150, 0.14, 'square', 0.04, -90); },
     fizzle: () => { noise(0.14, 0.06, 5000, 1500, 'highpass'); blip(240, 0.14, 'square', 0.03, -150); },
+    manaUp: () => [659, 880, 1175, 1568].forEach((f, i) => blip(f, 0.16, 'sine', 0.07, 0, i * 0.06)),
+    best: () => [523, 659, 784, 1047, 1319].forEach((f, i) => blip(f, 0.12, 'square', 0.04, 0, i * 0.07)),
     die: () => { blip(300, 0.6, 'sawtooth', 0.09, -250); blip(120, 0.8, 'square', 0.05, -80, 0.2); },
   };
 
+  /* ---------- music: looping dungeon theme, lookahead-scheduled on the AudioContext clock ---------- */
+  // 8 bars of 4/4 in A minor, 90 BPM, eighth-note grid (~21s loop). Bass + arpeggio + sparse lead + soft pad + soft kick, with an echo on the arp.
+  const BPM = 90, STEP = 60 / BPM / 2, BAR = 8, LOOK = 0.6, TICK_MS = 100, MUSIC_VOL = 0.2; // MUSIC_VOL: music bus gain, well under the SFX level
+  const ARP_A = [0, 1, 2, 1, 3, 2, 1, 2], ARP_B = [0, 2, 1, 3, 2, 1, 3, 2];
+  const SONG = [ // r: bass root, c: chord tones (midi), a: arp pattern, m: lead notes per step (0 = rest)
+    { r: 45, c: [57, 60, 64, 69], a: ARP_A, m: [0, 0, 0, 0, 0, 0, 0, 0] },       // Am
+    { r: 45, c: [57, 60, 64, 69], a: ARP_A, m: [76, 0, 0, 72, 0, 0, 71, 0] },    // Am
+    { r: 41, c: [53, 57, 60, 65], a: ARP_A, m: [0, 0, 0, 0, 69, 0, 0, 0] },      // F
+    { r: 40, c: [52, 56, 59, 64], a: ARP_A, m: [71, 0, 0, 68, 0, 0, 0, 0] },     // E
+    { r: 45, c: [57, 60, 64, 69], a: ARP_B, m: [69, 0, 72, 0, 76, 0, 0, 0] },    // Am
+    { r: 38, c: [50, 53, 57, 62], a: ARP_B, m: [0, 0, 0, 0, 74, 0, 0, 0] },      // Dm
+    { r: 41, c: [53, 57, 60, 65], a: ARP_B, m: [72, 0, 0, 69, 0, 0, 65, 0] },    // F
+    { r: 40, c: [52, 56, 59, 64], a: ARP_B, m: [71, 0, 0, 0, 68, 0, 0, 0] },     // E
+  ];
+  const music = { want: false, run: null, timer: 0, next: 0, step: 0, bus: null };
+  const mtof = n => 440 * Math.pow(2, (n - 69) / 12);
+  function mvoice(t, f, d, type, vol, attack, outs) { // one music note: osc -> gain envelope -> each destination in outs
+    const o = ac.createOscillator(), g = ac.createGain();
+    o.type = type; o.frequency.setValueAtTime(f, t);
+    g.gain.setValueAtTime(0.0001, t); g.gain.linearRampToValueAtTime(vol, t + attack); g.gain.exponentialRampToValueAtTime(0.0001, t + d);
+    o.connect(g); outs.forEach(n => g.connect(n)); o.start(t); o.stop(t + d + 0.05);
+  }
+  function scheduleStep(i, t) {
+    const run = music.run, bar = SONG[(i / BAR | 0) % SONG.length], s = i % BAR, dry = [run.g], wet = [run.g, run.send];
+    if (s === 0) { // pad: three slow triangles, one chord per bar
+      bar.c.slice(0, 3).forEach((n, k) => mvoice(t, mtof(n) * (k === 1 ? 1.003 : 1), STEP * BAR + 0.5, 'triangle', 0.13, 0.7, dry));
+    }
+    if (s === 0 || s === 4) { // soft kick
+      const o = ac.createOscillator(), g = ac.createGain();
+      o.type = 'sine'; o.frequency.setValueAtTime(110, t); o.frequency.exponentialRampToValueAtTime(42, t + 0.16);
+      g.gain.setValueAtTime(0.3, t); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.2);
+      o.connect(g); g.connect(run.g); o.start(t); o.stop(t + 0.25);
+    }
+    if (s === 0 || s === 3 || s === 6) mvoice(t, mtof(bar.r), STEP * 2.6, 'triangle', 0.34, 0.01, dry);
+    else if (s === 4) mvoice(t, mtof(bar.r + 7), STEP * 2, 'triangle', 0.26, 0.01, dry);
+    mvoice(t, mtof(bar.c[bar.a[s]] + 12), STEP * 1.6, 'square', s % 4 === 0 ? 0.2 : 0.13, 0.005, wet); // arpeggio
+    if (bar.m[s]) mvoice(t, mtof(bar.m[s]), STEP * 3.5, 'triangle', 0.3, 0.05, wet); // lead
+  }
+  function musicTick() {
+    music.timer = 0; const run = music.run; if (!run || !ac) return;
+    if (music.next < ac.currentTime) music.next = ac.currentTime + 0.05; // fell behind (tab was throttled): resync rather than burst-schedule the past
+    while (music.next < ac.currentTime + LOOK) { scheduleStep(music.step, music.next); music.next += STEP; music.step++; }
+    music.timer = setTimeout(musicTick, TICK_MS);
+  }
+  function musicPlay() { // start (or resume) the loop; needs an unlocked context, sound on, and a live game
+    if (!ac || muted || !music.want || music.run) return;
+    const t = ac.currentTime;
+    if (!music.bus) {
+      const lp = ac.createBiquadFilter(), bus = ac.createGain();
+      lp.type = 'lowpass'; lp.frequency.value = 2200; bus.gain.value = MUSIC_VOL; lp.connect(bus); bus.connect(ac.destination); music.bus = lp;
+    }
+    const g = ac.createGain(), send = ac.createGain(), delay = ac.createDelay(1), fb = ac.createGain();
+    g.gain.setValueAtTime(0.0001, t); g.gain.linearRampToValueAtTime(1, t + 1.2); // fade in
+    send.gain.value = 0.35; delay.delayTime.value = STEP * 3; fb.gain.value = 0.35;
+    send.connect(delay); delay.connect(fb); fb.connect(delay); delay.connect(g); g.connect(music.bus);
+    music.run = { g, send }; music.step = Math.ceil(music.step / BAR) * BAR; music.next = t + 0.08; // resume on a bar line
+    musicTick();
+  }
+  function musicHalt(fade) { // silence the loop now (mute) or fade it out (game over); everything already scheduled dies with its run gain
+    clearTimeout(music.timer); music.timer = 0;
+    const r = music.run; music.run = null; if (!r || !ac) return;
+    const t = ac.currentTime; r.g.gain.cancelScheduledValues(t); r.g.gain.setValueAtTime(r.g.gain.value, t); r.g.gain.linearRampToValueAtTime(0, t + fade);
+    setTimeout(() => { try { r.g.disconnect(); r.send.disconnect(); } catch (_) {} }, fade * 1000 + 150);
+  }
+
   /* ---------- state ---------- */
   function newGame() {
-    G = { state: 'title', depth: 1, gold: 0, kills: 0, hp: 20, maxhp: 20, mana: MAX_MANA, maxmana: MAX_MANA, turns: 0, face: [1, 0], fb: null,
+    G = { state: 'title', depth: 1, gold: 0, kills: 0, hp: 20, maxhp: 20, mana: MAX_MANA, maxmana: MAX_MANA, turns: 0, face: [1, 0], fb: null, goldMana: 0, lastScore: 0, startBest: best, newBest: false,
           p: { x: 0, y: 0, fx: 0, fy: 0, t0: -1e9, bt: 0, bx: 0, by: 0, hitT: -1e9 } };
-    startLevel(); hud();
+    startLevel(); G.lastScore = score(); hud();
   }
   function startLevel() {
     const L = generate(G.depth, rnd), p = G.p;
@@ -223,19 +291,13 @@ if (typeof window !== 'undefined') (function () {
     if (G.state !== 'play' || G.fb) return false;
     if (dir === 'F') return cast(now);
     const [dx, dy] = DIRS[dir], p = G.p, nx = p.x + dx, ny = p.y + dy;
+    let bumped = null;
+    const threat = G.enemies.filter(e => Math.abs(e.x - p.x) + Math.abs(e.y - p.y) === 1); // adjacent as the round starts: it will strike this round even if the player steps away (else a chaser that spends every turn closing the gap never attacks)
     if (dx || dy) {
       G.face = [dx, dy]; // facing = last move direction (even a bump), used to aim fireballs
       const en = enemyAt(nx, ny);
-      if (en) {
-        const dmg = 2 + (rnd() * 3 | 0);
-        en.hp -= dmg; en.hitT = now; en.alert = 6; p.bt = now; p.bx = dx; p.by = dy;
-        floatText(en.x + 0.5, en.y, '-' + dmg, '#ffe27a'); burst(en.x + 0.5, en.y + 0.5, en.k.glow, 8, 3.5);
-        shake = Math.min(shake + 3, 8); sfx.hit();
-        if (en.hp <= 0) {
-          G.enemies.splice(G.enemies.indexOf(en), 1); G.kills++;
-          burst(en.x + 0.5, en.y + 0.5, en.k.col, 22, 5); sfx.hit();
-          if (rnd() < 0.4) G.items.push({ x: en.x, y: en.y, type: 'gold', value: 2 + (rnd() * 4 | 0) + G.depth });
-        }
+      if (en) { // touching an enemy hurts: no attack, no move. The enemy strikes and the bump costs the turn (it does not act again in endTurn)
+        en.alert = 6; p.bt = now; p.bx = dx; p.by = dy; attackPlayer(en, now); bumped = en;
       } else if (G.tiles[ny * MW + nx]) {
         moveTo(p, nx, ny, now); sfx.step();
         const idx = G.items.findIndex(i => i.x === nx && i.y === ny);
@@ -243,12 +305,12 @@ if (typeof window !== 'undefined') (function () {
         if (G.tiles[ny * MW + nx] === 2) { descend(); return true; }
       } else return false; // bumping a wall costs no turn
     }
-    endTurn(now);
+    endTurn(now, bumped, threat);
     return true;
   }
-  function endTurn(now) {
+  function endTurn(now, skip, threat) {
     G.turns++; if (G.mana < G.maxmana) G.mana++;
-    computeFov(); enemiesAct(now); miniDirty = true; hud();
+    computeFov(); enemiesAct(now, skip, threat); miniDirty = true; hud();
   }
 
   /* ---------- fireball ---------- */
@@ -310,19 +372,34 @@ if (typeof window !== 'undefined') (function () {
       const heal = Math.min(it.value, G.maxhp - G.hp); G.hp += heal;
       floatText(cx, it.y, '+' + heal + ' HP', '#7dff9a'); burst(cx, cy, '#ff6b8a', 18, 3, 1.5); sfx.potion(); say('You drink a health potion');
     } else {
-      G.gold += it.value; floatText(cx, it.y, '+' + it.value, '#ffd34d');
+      G.gold += it.value; floatText(cx, it.y, '+' + it.value, '#ffd34d'); goldMana();
       burst(cx, cy, '#ffd34d', it.type === 'chest' ? 30 : 14, it.type === 'chest' ? 5 : 3, 1.5); sfx.coin();
       if (it.type === 'chest') say('You open a chest! +' + it.value + ' gold');
     }
+  }
+  function goldMana() { // each full 50 gold collected: +1 max mana and +1 mana now
+    const due = Math.floor(G.gold / GOLD_PER_MANA);
+    while (G.goldMana < due) {
+      G.goldMana++; G.maxmana++; G.mana = Math.min(G.maxmana, G.mana + 1);
+      floatText(G.p.x + 0.5, G.p.y - 0.7, '+1 MAX MP', '#6ab7ff'); burst(G.p.x + 0.5, G.p.y + 0.5, '#6ab7ff', 16, 3, 1.5); sfx.manaUp();
+    }
+  }
+  const score = () => G.gold + G.depth * 50 + G.kills * 10;
+  function pulse(el) { el.classList.remove('up'); void el.offsetWidth; el.classList.add('up'); }
+  function refreshBest(sc) { // keep the best score live; the first time a run passes an existing best, celebrate once
+    if (sc <= best) return;
+    if (G.startBest > 0 && !G.newBest) { G.newBest = true; say('NEW BEST!'); sfx.best(); pulse($('bestcell')); floatText(G.p.x + 0.5, G.p.y - 1, 'NEW BEST!', '#ffd34d'); }
+    best = sc; try { localStorage.setItem('dde-best', sc); } catch (_) {}
   }
   function descend() {
     G.depth++; G.hp = Math.min(G.maxhp, G.hp + 3); sfx.stairs(); startLevel(); hud(); say('Depth ' + G.depth + (G.depth === 3 ? ' - demons stir below' : ''));
   }
   function distMap() { return bfs(G.tiles, G.p.x, G.p.y); }
-  function enemiesAct(now) {
+  function enemiesAct(now, skip, threat) { // skip: the enemy the player just bumped, which already struck this turn; threat: enemies that began the round adjacent
     turn++; const dm = distMap(), p = G.p;
     for (const e of G.enemies) {
       if (G.state !== 'play') break;
+      if (e === skip) continue;
       if (e.k.slow && turn % 2) continue;
       const d = Math.abs(e.x - p.x) + Math.abs(e.y - p.y), i = e.y * MW + e.x;
       if (G.vis[i] && d <= e.k.sight) e.alert = 6;
@@ -332,7 +409,10 @@ if (typeof window !== 'undefined') (function () {
       if (e.alert > 0) {
         e.alert--;
         const better = nb.filter(([x, y]) => dm[y * MW + x] >= 0 && dm[y * MW + x] < dm[i]);
-        if (better.length) moveTo(e, ...better[(rnd() * better.length) | 0], now);
+        if (better.length) {
+          moveTo(e, ...better[(rnd() * better.length) | 0], now);
+          if (threat && threat.includes(e) && Math.abs(e.x - p.x) + Math.abs(e.y - p.y) === 1) attackPlayer(e, now); // followed a fleeing player and closed: strike
+        }
       } else if (nb.length && rnd() < 0.5) moveTo(e, ...nb[(rnd() * nb.length) | 0], now);
     }
   }
@@ -341,10 +421,9 @@ if (typeof window !== 'undefined') (function () {
     G.hp -= e.dmg; floatText(p.x + 0.5, p.y, '-' + e.dmg, '#ff5a5a'); burst(p.x + 0.5, p.y + 0.5, '#ff3b3b', 12, 3.5);
     shake = Math.min(shake + 6, 12); hurt = 1; sfx.hurt();
     if (G.hp <= 0) {
-      G.hp = 0; G.state = 'dead'; sfx.die(); burst(p.x + 0.5, p.y + 0.5, '#ffffff', 40, 6);
-      let best = 0, score = G.gold + G.depth * 50 + G.kills * 10;
-      try { best = +localStorage.getItem('dde-best') || 0; if (score > best) { best = score; localStorage.setItem('dde-best', score); } } catch (_) { best = Math.max(best, score); }
-      $('stats').innerHTML = `Depth reached <b>${G.depth}</b><br>Gold <b>${G.gold}</b> &nbsp; Kills <b>${G.kills}</b><br>Score <b>${score}</b> &nbsp; Best <b>${best}</b>`;
+      G.hp = 0; G.state = 'dead'; sfx.die(); music.want = false; musicHalt(1.8); burst(p.x + 0.5, p.y + 0.5, '#ffffff', 40, 6);
+      const sc = score(); refreshBest(sc);
+      $('stats').innerHTML = `Depth reached <b>${G.depth}</b><br>Gold <b>${G.gold}</b> &nbsp; Kills <b>${G.kills}</b><br>Score <b>${sc}</b> &nbsp; Best <b>${best}</b>${G.newBest ? '<br>NEW BEST!' : ''}`;
       setTimeout(() => $('over').classList.remove('hidden'), 900);
     }
   }
@@ -353,19 +432,21 @@ if (typeof window !== 'undefined') (function () {
     $('bar').classList.toggle('low', G.hp / G.maxhp <= 0.3);
     $('mpfill').style.width = (G.mana / G.maxmana * 100) + '%'; $('mptxt').textContent = G.mana + '/' + G.maxmana;
     $('fire').classList.toggle('off', G.mana < FB_COST);
+    const sc = score(); refreshBest(sc);
+    $('score').textContent = sc; $('best').textContent = best; if (sc > G.lastScore) pulse($('scorecell')); G.lastScore = sc;
     $('gold').textContent = G.gold; $('depth').textContent = G.depth; $('kills').textContent = G.kills;
   }
 
   /* ---------- input ---------- */
   function begin() {
     unlock();
-    if (G.state === 'title') { G.state = 'play'; $('title').classList.add('hidden'); }
-    else if (G.state === 'dead' && !$('over').classList.contains('hidden')) { $('over').classList.add('hidden'); newGame(); G.state = 'play'; }
+    if (G.state === 'title') { G.state = 'play'; $('title').classList.add('hidden'); music.want = true; musicPlay(); }
+    else if (G.state === 'dead' && !$('over').classList.contains('hidden')) { $('over').classList.add('hidden'); newGame(); G.state = 'play'; music.want = true; music.step = 0; musicPlay(); }
   }
   addEventListener('keydown', ev => {
     if (ev.metaKey || ev.ctrlKey || ev.altKey) return;
     const k = ev.key; unlock();
-    if (k === 'm' || k === 'M') { muted = !muted; $('snd').textContent = 'M: SOUND ' + (muted ? 'OFF' : 'ON'); return; }
+    if (k === 'm' || k === 'M') { muted = !muted; $('snd').textContent = 'M: SOUND ' + (muted ? 'OFF' : 'ON'); if (muted) musicHalt(0.05); else musicPlay(); return; }
     if (k === 'r' || k === 'R') { if (G.state === 'dead') begin(); return; }
     const dir = KEYMAP[k];
     if (dir || k === 'Enter') ev.preventDefault();

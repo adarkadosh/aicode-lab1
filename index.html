@@ -20,7 +20,10 @@
   .cell { padding:7px 9px; background:rgba(12,9,22,.72); border:2px solid rgba(42,33,66,.95); border-radius:3px; display:flex; align-items:center; gap:7px; }
   .cell small { color:var(--dim); font-size:8px; font-weight:normal; }
   .cell b { color:var(--gold); font-weight:normal; }
-  .cell.k b { color:#ff8a7a; } .cell.d b { color:#9fd6ff; }
+  .cell.k b { color:#ff8a7a; } .cell.d b { color:#9fd6ff; } .cell.s b { color:#7dff9a; } .cell.b b { color:#ffb347; }
+  .cell.up { animation:scoreup .5s; } .cell.b.up { animation:bestup 1.4s; }
+  @keyframes scoreup { 0% { transform:scale(1); } 30% { transform:scale(1.18); border-color:#7dff9a; box-shadow:0 0 14px #7dff9a88; } 100% { transform:scale(1); } }
+  @keyframes bestup { 0%,40%,80% { transform:scale(1.18); border-color:#ffd34d; box-shadow:0 0 16px #ffd34daa; } 20%,60%,100% { transform:scale(1); } }
   .bar { position:relative; width:130px; height:16px; background:#1a0d12; border:2px solid #3a1c24; border-radius:2px; overflow:hidden; }
   .bar i { position:absolute; inset:0 auto 0 0; width:100%; background:linear-gradient(#ff6b5f,#b02a2a); box-shadow:0 0 10px #ff4b3f88; transition:width .25s; }
   .bar b { position:absolute; inset:0; display:grid; place-items:center; font-size:8px; color:#fff; text-shadow:0 1px 0 #000, 1px 0 0 #000; }
@@ -89,6 +92,8 @@
   <div class="cell"><small>GOLD</small><b id="gold">0</b></div>
   <div class="cell d"><small>DEPTH</small><b id="depth">1</b></div>
   <div class="cell k"><small>KILLS</small><b id="kills">0</b></div>
+  <div class="cell s" id="scorecell"><small>SCORE</small><b id="score">0</b></div>
+  <div class="cell b" id="bestcell"><small>BEST</small><b id="best">0</b></div>
 </div>
 <div id="msg"></div>
 <canvas id="mini" width="120" height="80"></canvas>
@@ -103,10 +108,12 @@
   <h1>DUNGEON<br>EXPLORER</h1>
   <div class="sub">Every depth is a new labyrinth. Grab the gold, outlast the dark, find the stairs.</div>
   <div class="keys">
-    <span>&#8592;&#8593;&#8595;&#8594;</span> / <span>WASD</span> move &amp; attack<br>
-    <span>SPACE</span> cast fireball (4 MP)<br>
+    <span>&#8592;&#8593;&#8595;&#8594;</span> / <span>WASD</span> move<br>
+    Avoid enemies &mdash; touching them hurts!<br>
+    <span>SPACE</span> cast fireball (4 MP) &mdash; your only weapon<br>
+    Every 50 gold: +1 max mana<br>
     <span>.</span> wait a turn<br>
-    <span>M</span> mute sound<br>
+    <span>M</span> mute music &amp; sound<br>
     Phone: swipe or d-pad, FIRE button
   </div>
   <div class="go">PRESS ANY KEY / TAP TO DESCEND</div>
